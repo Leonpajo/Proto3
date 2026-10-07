@@ -1,27 +1,28 @@
 using UnityEngine;
 
-/// Put this on the cow (the spawned prefab).
+/// Put this on the prefab that gets spawned.
+/// Also give the prefab a Collider and a Rigidbody (tick Is Kinematic)
+/// so the trigger zone can detect it.
 public class WalkingPrefab : MonoBehaviour
 {
     public float speed = 2f;
     public float walkDistance = 10f;   // overwritten by the spawner
 
     Vector3 startPos;
-    bool paused;
-    bool reachedEnd;
+    bool walking = true;
 
     void Start() => startPos = transform.position;
 
     void Update()
     {
-        if (paused || reachedEnd) return;
+        if (!walking) return;
 
         transform.position += transform.forward * speed * Time.deltaTime;
 
         if (Vector3.Distance(startPos, transform.position) >= walkDistance)
-            reachedEnd = true;
+            walking = false;   // reached the end of its walk
     }
 
-    public void Pause() => paused = true;    // stop while being talked to
-    public void Resume() => paused = false;   // carries on (unless it already finished its walk)
+    public void Pause()  => walking = false;
+    public void Resume() => walking = true;
 }
