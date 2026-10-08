@@ -39,10 +39,17 @@ public class SlapHand : MonoBehaviour
 
     Transform handInstance;
     Camera cam;
+    Action pendingDone;
+    Vector3 cameraRestPosition;
+    bool shaking;
+    bool ownsHand;
+    Coroutine flashRoutine;
 
     void Awake()
     {
+        if (Instance != null && Instance != this) { Destroy(this); return; }
         Instance = this;
+        IsPlaying = false;
         // If the hand is an object in the scene, hide it until the slap.
         if (hand != null && hand.gameObject.scene.IsValid()) hand.gameObject.SetActive(false);
         if (flash != null) { flash.raycastTarget = false; SetFlash(0f); }
@@ -52,6 +59,7 @@ public class SlapHand : MonoBehaviour
     public void Play(Action onHit = null, Action onDone = null)
     {
         if (IsPlaying) return;
+        if (!isActiveAndEnabled) { onDone?.Invoke(); return; }
 
         if (!Setup())
         {
@@ -60,7 +68,9 @@ public class SlapHand : MonoBehaviour
             onDone?.Invoke();
             return;
         }
-        StartCoroutine(SlapRoutine(onHit, onDone));
+        pendingDone = onDone;
+        IsPlaying = true;
+        StartCoroutine(SlapRoutine(onHit));
     }
 
     bool Setup()
@@ -81,13 +91,14 @@ public class SlapHand : MonoBehaviour
         if (handInstance == null)
         {
             // Prefab asset -> make a copy. Scene object -> use it directly.
-            handInstance = hand.gameObject.scene.IsValid() ? hand : Instantiate(hand);
+            ownsHand = !hand.gameObject.scene.IsValid();
+            handInstance = ownsHand ? Instantiate(hand) : hand;
         }
         if (handInstance.parent != cam.transform) handInstance.SetParent(cam.transform, false);
         return true;
     }
 
-    IEnumerator SlapRoutine(Action onHit, Action onDone)
+    IEnumerator SlapRoutine(Action onHit)
     {
         IsPlaying = true;
         handInstance.gameObject.SetActive(true);
@@ -107,11 +118,11 @@ public class SlapHand : MonoBehaviour
 
         // 2) IMPACT
         if (audioSource != null && slapSound != null) audioSource.PlayOneShot(slapSound);
-        if (flash != null) StartCoroutine(FlashRoutine());
+        if (flash != null) flashRoutine = StartCoroutine(FlashRoutine());
         if (shakeCamera) StartCoroutine(ShakeRoutine(cam.transform));
         onHit?.Invoke();
 
-        yield return new WaitForSecondsRealtime(holdTime);
+        yield return new WaitForSecondsRealtime(Mathf.Max(0, holdTime));
 
         // 3) Retreat (ease-out)
         for (float t = 0; t < retreatTime; t += Time.unscaledDeltaTime)
@@ -123,8 +134,14 @@ public class SlapHand : MonoBehaviour
         }
 
         handInstance.gameObject.SetActive(false);
+        // Wait for the camera and flash to settle before returning to gameplay.
+        while (shaking) yield return null;
+        if (flashRoutine != null) { StopCoroutine(flashRoutine); flashRoutine = null; }
+        SetFlash(0);
         IsPlaying = false;
-        onDone?.Invoke();
+        Action done = pendingDone;
+        pendingDone = null;
+        done?.Invoke();
     }
 
     IEnumerator FlashRoutine()
@@ -139,18 +156,43 @@ public class SlapHand : MonoBehaviour
 
     void SetFlash(float a)
     {
+        if (flash == null) return;
         Color c = flash.color; c.a = a; flash.color = c;
     }
 
     IEnumerator ShakeRoutine(Transform camT)
     {
-        Vector3 original = camT.localPosition;
-        for (float t = 0; t < shakeTime; t += Time.unscaledDeltaTime)
+        cameraRestPosition = camT.localPosition;
+        Vector3 original = cameraRestPosition;
+        shaking = true;
+        for (float t = 0; camT != null && t < shakeTime; t += Time.unscaledDeltaTime)
         {
             float fade = 1f - t / shakeTime;
             camT.localPosition = original + (Vector3)UnityEngine.Random.insideUnitCircle * shakeStrength * fade;
             yield return null;
         }
-        camT.localPosition = original;
+        if (camT != null) camT.localPosition = original;
+        shaking = false;
+    }
+
+    void OnDisable()
+    {
+        if (Instance != this) return;
+        StopAllCoroutines();
+        if (shaking && cam != null) cam.transform.localPosition = cameraRestPosition;
+        shaking = false;
+        if (handInstance != null) handInstance.gameObject.SetActive(false);
+        if (flashRoutine != null) { StopCoroutine(flashRoutine); flashRoutine = null; }
+        SetFlash(0);
+        IsPlaying = false;
+        Action done = pendingDone;
+        pendingDone = null;
+        done?.Invoke();
+    }
+
+    void OnDestroy()
+    {
+        if (ownsHand && handInstance != null) Destroy(handInstance.gameObject);
+        if (Instance == this) { Instance = null; IsPlaying = false; }
     }
 }

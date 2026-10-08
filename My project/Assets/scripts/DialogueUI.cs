@@ -1,199 +1,169 @@
 using System;
-using System.Collections.Generic;
+using System.Collections;
 using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-/// ONE of these in the scene, on your Canvas (not on the panel).
-/// Prefabs can't reference scene objects, so cows talk to this via DialogueUI.Instance.
+// Put on the Canvas, not on the dialogue panel. Missing references use a built-in fallback UI.
 public class DialogueUI : MonoBehaviour
 {
     public static DialogueUI Instance { get; private set; }
     public static bool IsOpen => Instance != null && Instance.open;
-
-    public GameObject panel;      // the text box panel (hidden at start)
+    public GameObject panel;
     public TMP_Text messageText;
-    public Button yesButton;
-    public Button noButton;
-
-    [Header("Debug")]
-    public bool logClicks = true;   // prints what the mouse is clicking on while the dialog is open
-
-    Action onYes, onNo;
-    bool open;
-    bool answering;   // true only while Yes/No is being asked (not during a reply)
+    public Button yesButton, noButton;
+    public bool logClicks = false;
+    Action onYes, onNo, onCancel, replyDone;
+    bool open, answering;
+    string message, yesLabel = "Yes", noLabel = "No";
     CursorLockMode previousLock;
     bool previousVisible;
-
+    Coroutine replyRoutine;
+    bool Wired => panel != null && messageText != null && yesButton != null && noButton != null;
     void Awake()
     {
+        if (Instance != null && Instance != this) { Destroy(this); return; }
         Instance = this;
-        SetVisible(false);
-        yesButton.onClick.AddListener(() => Close(onYes));
-        noButton.onClick.AddListener(() => Close(onNo));
-
-        EnsureClickable();
+        HideObjects();
+        if (yesButton != null) yesButton.onClick.AddListener(ChooseYes);
+        if (noButton != null) noButton.onClick.AddListener(ChooseNo);
+        if (Wired) EnsureClickable();
     }
-
-
-    // Fixes the usual reasons UI buttons can't be clicked.
     void EnsureClickable()
     {
-        // 1) EventSystem + the right input module for your Input setting
         EventSystem es = FindFirstObjectByType<EventSystem>();
-        if (es == null)
-        {
-            es = new GameObject("EventSystem").AddComponent<EventSystem>();
-            Debug.LogWarning("DialogueUI: there was no EventSystem, so I created one.");
-        }
+        if (es == null) es = new GameObject("EventSystem").AddComponent<EventSystem>();
 #if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
-        StandaloneInputModule oldModule = es.GetComponent<StandaloneInputModule>();
-        if (oldModule != null) Destroy(oldModule);
+        var oldModule = es.GetComponent<StandaloneInputModule>();
+        if (oldModule != null) { oldModule.enabled = false; Destroy(oldModule); }
         if (es.GetComponent<UnityEngine.InputSystem.UI.InputSystemUIInputModule>() == null)
             es.gameObject.AddComponent<UnityEngine.InputSystem.UI.InputSystemUIInputModule>();
 #else
-        if (es.GetComponent<BaseInputModule>() == null)
-            es.gameObject.AddComponent<StandaloneInputModule>();
+        if (es.GetComponent<BaseInputModule>() == null) es.gameObject.AddComponent<StandaloneInputModule>();
 #endif
-
-        // 2) Canvas needs a Graphic Raycaster
         Canvas canvas = panel.GetComponentInParent<Canvas>();
-        if (canvas != null)
+        if (canvas != null && canvas.rootCanvas.GetComponent<GraphicRaycaster>() == null)
+            canvas.rootCanvas.gameObject.AddComponent<GraphicRaycaster>();
+        messageText.raycastTarget = false;
+        foreach (Button button in new[] { yesButton, noButton })
         {
-            Canvas root = canvas.rootCanvas;
-            if (root.GetComponent<GraphicRaycaster>() == null)
-                root.gameObject.AddComponent<GraphicRaycaster>();
+            TMP_Text label = button.GetComponentInChildren<TMP_Text>(true);
+            if (label != null) label.raycastTarget = false;
+            if (button.targetGraphic != null) button.targetGraphic.raycastTarget = true;
         }
     }
-
-    // Makes sure nothing above the buttons is switching clicks off.
-    void MakeButtonsInteractable()
+    void Begin()
     {
-        foreach (Button b in new[] { yesButton, noButton })
-        {
-            b.interactable = true;
-            foreach (CanvasGroup g in b.GetComponentsInParent<CanvasGroup>(true))
-            {
-                g.interactable = true;
-                g.blocksRaycasts = true;
-            }
-        }
+        if (!open) { previousLock = Cursor.lockState; previousVisible = Cursor.visible; }
+        open = true;
+        Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
     }
-
-    public void Show(string message, Action yes, Action no)
+    public void Show(string text, Action yes, Action no)
+        => ShowChoice(text, "Yes", "No", yes, no, null);
+    public void ShowChoice(string text, string first, string second, Action yes, Action no, Action cancel)
     {
-        onYes = yes;
-        onNo = no;
-        messageText.text = message;
-
-        previousLock = Cursor.lockState;
-        previousVisible = Cursor.visible;
-
-        answering = true;
-        SetVisible(true);
-        MakeButtonsInteractable();
-        FreeCursor();
+        if (open) return;
+        Begin(); answering = true;
+        message = text; yesLabel = first; noLabel = second;
+        onYes = yes; onNo = no; onCancel = cancel;
+        RefreshObjects();
     }
-
-    // Runs after every other script's Update, so a controller that
-    // re-locks the cursor each frame can't win while the dialog is open.
+    public void ShowReply(string text, float seconds, Action done)
+    {
+        if (open) return;
+        Begin(); answering = false; message = text; replyDone = done;
+        RefreshObjects();
+        replyRoutine = StartCoroutine(ReplyRoutine(Mathf.Max(1f, seconds)));
+    }
+    IEnumerator ReplyRoutine(float seconds)
+    {
+        yield return new WaitForSecondsRealtime(seconds);
+        replyRoutine = null;
+        FinishReply();
+    }
     void LateUpdate()
     {
         if (!open) return;
-        FreeCursor();
-
-        // Keyboard fallback: works even if mouse clicks don't
+        Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
         if (answering)
         {
-            if (KeyPressed(KeyCode.Y)) Close(onYes);
-            else if (KeyPressed(KeyCode.N)) Close(onNo);
+            if (GameInput.Pressed(KeyCode.Y) || GameInput.Pressed(KeyCode.Alpha1)) ChooseYes();
+            else if (GameInput.Pressed(KeyCode.N) || GameInput.Pressed(KeyCode.Alpha2)) ChooseNo();
+            else if (GameInput.Pressed(KeyCode.Escape)) Cancel();
         }
-
-        if (logClicks && MouseClicked()) LogWhatWasClicked();
+        else if (GameInput.Pressed(KeyCode.Space) || GameInput.Pressed(KeyCode.Escape)) FinishReply();
     }
-
-    void LogWhatWasClicked()
+    void ChooseYes() { if (open && answering) Complete(onYes); }
+    void ChooseNo() { if (open && answering) Complete(onNo); }
+    public void Cancel()
     {
-        EventSystem es = EventSystem.current;
-        if (es == null) { Debug.LogWarning("[DialogueUI] Click: there is NO EventSystem."); return; }
-
-        var data = new PointerEventData(es) { position = MousePosition() };
-        var hits = new List<RaycastResult>();
-        es.RaycastAll(data, hits);
-
-        string top = hits.Count > 0 ? hits[0].gameObject.name : "NOTHING (no UI under the mouse)";
-        Debug.Log($"[DialogueUI] Click at {data.position}. Top UI hit: {top}. " +
-                  $"Input module: {(es.currentInputModule != null ? es.currentInputModule.GetType().Name : "NONE")}. " +
-                  $"Cursor lock: {Cursor.lockState}");
+        if (!open) return;
+        if (!answering) { FinishReply(); return; }
+        Complete(onCancel);
     }
-
-    // Shows/hides everything explicitly, so it works even if the buttons
-    // or text are not children of the panel.
-    void SetVisible(bool visible)
+    void FinishReply() { if (open && !answering) Complete(replyDone); }
+    void Complete(Action callback)
     {
-        open = visible;
-        panel.SetActive(visible);
-        messageText.gameObject.SetActive(visible);
-        yesButton.gameObject.SetActive(visible);
-        noButton.gameObject.SetActive(visible);
-    }
-
-    /// Shows a message with no buttons for a moment (the cow's reply), then calls done.
-    public void ShowReply(string message, float seconds, Action done)
-    {
-        previousLock = Cursor.lockState;
-        previousVisible = Cursor.visible;
-        StartCoroutine(ReplyRoutine(message, seconds, done));
-    }
-
-    System.Collections.IEnumerator ReplyRoutine(string message, float seconds, Action done)
-    {
-        answering = false;
-        open = true;
-        messageText.text = message;
-        panel.SetActive(true);
-        messageText.gameObject.SetActive(true);
-        yesButton.gameObject.SetActive(false);
-        noButton.gameObject.SetActive(false);
-
-        yield return new WaitForSecondsRealtime(seconds);
-
-        SetVisible(false);
-        Cursor.lockState = previousLock;
-        Cursor.visible = previousVisible;
-        done?.Invoke();
-    }
-
-    void FreeCursor()
-    {
-        Cursor.lockState = CursorLockMode.None;
-        Cursor.visible = true;
-    }
-
-    void Close(Action callback)
-    {
-        answering = false;
-        SetVisible(false);
-        Cursor.lockState = previousLock;
-        Cursor.visible = previousVisible;
+        if (replyRoutine != null) { StopCoroutine(replyRoutine); replyRoutine = null; }
+        open = false; answering = false;
+        onYes = onNo = onCancel = replyDone = null;
+        HideObjects();
+        Cursor.lockState = previousLock; Cursor.visible = previousVisible;
         callback?.Invoke();
     }
-
-    // ---- input helpers (work with the old and the new Input System) ----
-#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
-    bool KeyPressed(KeyCode key)
+    void HideObjects()
     {
-        var kb = UnityEngine.InputSystem.Keyboard.current;
-        if (kb == null) return false;
-        return key == KeyCode.Y ? kb.yKey.wasPressedThisFrame : kb.nKey.wasPressedThisFrame;
+        if (panel != null) panel.SetActive(false);
+        if (messageText != null) messageText.gameObject.SetActive(false);
+        if (yesButton != null) yesButton.gameObject.SetActive(false);
+        if (noButton != null) noButton.gameObject.SetActive(false);
     }
-    bool MouseClicked() => UnityEngine.InputSystem.Mouse.current != null
-                           && UnityEngine.InputSystem.Mouse.current.leftButton.wasPressedThisFrame;
-    Vector2 MousePosition() => UnityEngine.InputSystem.Mouse.current.position.ReadValue();
-#else
-    bool KeyPressed(KeyCode key) => Input.GetKeyDown(key);
-    bool MouseClicked() => Input.GetMouseButtonDown(0);
-    Vector2 MousePosition() => Input.mousePosition;
-#endif
+    void RefreshObjects()
+    {
+        if (!Wired) return;
+        panel.SetActive(true); messageText.gameObject.SetActive(true); messageText.text = message;
+        foreach (CanvasGroup group in panel.GetComponentsInParent<CanvasGroup>(true))
+        { group.interactable = true; group.blocksRaycasts = true; group.alpha = 1; }
+        SetButton(yesButton, "[1 / Y] " + yesLabel);
+        SetButton(noButton, "[2 / N] " + noLabel);
+    }
+    void SetButton(Button button, string label)
+    {
+        button.gameObject.SetActive(answering); button.interactable = true;
+        TMP_Text tmp = button.GetComponentInChildren<TMP_Text>(true);
+        if (tmp != null) tmp.text = label;
+        else { Text old = button.GetComponentInChildren<Text>(true); if (old != null) old.text = label; }
+    }
+    void OnGUI()
+    {
+        if (!open) return;
+        if (Wired)
+        {
+            GUI.Label(new Rect(20, Screen.height - 30, Screen.width - 40, 26), answering ? "1 / Y: first choice | 2 / N: second choice | Esc: leave" : "Space: continue");
+            return;
+        }
+        float width = Mathf.Min(680, Screen.width - 24);
+        var style = new GUIStyle(GUI.skin.label) { fontSize = 20, wordWrap = true };
+        GUILayout.BeginArea(new Rect((Screen.width - width) / 2, Mathf.Max(12, Screen.height / 2 - 170), width, 340), GUI.skin.box);
+        GUILayout.Label(message, style); GUILayout.FlexibleSpace();
+        if (answering)
+        {
+            if (GUILayout.Button("[1 / Y] " + yesLabel, GUILayout.Height(52))) ChooseYes();
+            if (GUILayout.Button("[2 / N] " + noLabel, GUILayout.Height(52))) ChooseNo();
+            if (GUILayout.Button("Leave conversation [Esc]", GUILayout.Height(30))) Cancel();
+        }
+        else if (GUILayout.Button("Continue [Space]", GUILayout.Height(44))) FinishReply();
+        GUILayout.EndArea();
+    }
+    void OnDisable()
+    {
+        if (open) Complete(answering ? onCancel : replyDone);
+    }
+    void OnDestroy()
+    {
+        if (yesButton != null) yesButton.onClick.RemoveListener(ChooseYes);
+        if (noButton != null) noButton.onClick.RemoveListener(ChooseNo);
+        if (Instance == this) Instance = null;
+    }
 }
