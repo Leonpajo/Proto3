@@ -82,7 +82,7 @@ MonoBehaviour:
   - Oh. That's... udderly disappointing.
   - Fair enough. I'll go back to chewing.
   replyDuration: 1.5
-  promptObject: {fileID: 0}
+  promptObject: {fileID: 919132149155446097, guid: 1bf2646657ef8eb47b68b13524bbd5ca, type: 3}
   onYes:
     m_PersistentCalls:
       m_Calls: []

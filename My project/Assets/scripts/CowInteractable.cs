@@ -44,6 +44,10 @@ public class CowInteractable : MonoBehaviour
     public float replyDuration = 1.5f;
     public GameObject promptObject;           // optional "Press E" text/icon, child of the cow
 
+    [Header("Slap")]
+    [Tooltip("ON: pressing No makes a hand slap you (needs a SlapHand in the scene).")]
+    public bool slapOnNo = true;
+
     public UnityEvent onYes;
     public UnityEvent onNo;
 
@@ -81,7 +85,7 @@ public class CowInteractable : MonoBehaviour
 
     void Update()
     {
-        if (playerInRange && !DialogueUI.IsOpen && InteractPressed())
+        if (playerInRange && !DialogueUI.IsOpen && !SlapHand.IsPlaying && InteractPressed())
             Interact();
     }
 
@@ -97,6 +101,19 @@ public class CowInteractable : MonoBehaviour
         if (yes) onYes.Invoke(); else onNo.Invoke();
 
         string[] pool = yes ? yesReplies : noReplies;
+
+        // Pressed NO -> get slapped first, then the cow's reply shows
+        if (!yes && slapOnNo && SlapHand.Instance != null)
+        {
+            SlapHand.Instance.Play(onHit: null, onDone: () => ShowReplyOrFinish(pool));
+            return;
+        }
+
+        ShowReplyOrFinish(pool);
+    }
+
+    void ShowReplyOrFinish(string[] pool)
+    {
         if (pool != null && pool.Length > 0)
         {
             string reply = pool[Random.Range(0, pool.Length)];
